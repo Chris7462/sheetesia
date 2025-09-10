@@ -1,180 +1,179 @@
 import cv2
 import numpy as np
 from typing import List, Tuple
-from octave import Octave
-
-# Note constants
-NOTE_C = 0
-NOTE_CSHARP = 1
-NOTE_D = 2
-NOTE_DSHARP = 3
-NOTE_E = 4
-NOTE_F = 5
-NOTE_FSHARP = 6
-NOTE_G = 7
-NOTE_GSHARP = 8
-NOTE_A = 9
-NOTE_ASHARP = 10
-NOTE_B = 11
+from key import Key
 
 
 class Piano:
-    """Represents a piano with multiple octaves detected from an image"""
+    """Represents a piano with 88 keys detected from a defined region"""
 
-    def __init__(self, image: np.ndarray, unscaled_template: np.ndarray):
-        self.octaves: List[Octave] = []
-        self._detect_octaves(image, unscaled_template)
+    def __init__(self, image: np.ndarray, region: dict):
+        self.keys: List[Key] = []
+        self.region = region
+        self._create_88_keys(image, region)
 
-    def _detect_octaves(self, image: np.ndarray, unscaled_template: np.ndarray):
-        """Detect all octaves in the image using template matching"""
-        # Scale template to fit the image
-        template = self._get_scaled_template(image, unscaled_template)
+    def _create_88_keys(self, image: np.ndarray, region: dict):
+        """Create all 88 piano keys based on the defined region"""
+        x1, y1 = region["x1"], region["y1"]
+        x2, y2 = region["x2"], region["y2"]
+        width = x2 - x1
+        height = y2 - y1
 
-        # Perform template matching
-        result = cv2.matchTemplate(image, template, cv2.TM_SQDIFF_NORMED)
+        # Piano has 52 white keys and 36 black keys
+        white_key_width = width / 52
+        black_key_width = white_key_width * 0.6  # Standard ratio
 
-        # Find octaves using adaptive thresholding
-        thresh = 0.0
-        thresh_step = 0.02
+        # Y positions - black keys are in top portion to avoid white key overlap
+        white_key_y = y1 + int(height * 0.8)  # 80% down from top
+        black_key_y = y1 + int(height * 0.4)  # 40% down from top
 
-        while thresh <= 1.0:
-            # Threshold the result
-            _, threshold_result = cv2.threshold(result, thresh, 1.0, cv2.THRESH_BINARY)
-            threshold_result = threshold_result.astype(np.uint8)
+        # Track white key positions for black key placement
+        white_key_positions = []
 
-            # Find all matches
-            temp_octaves = []
-            result_copy = threshold_result.copy()
+        # Create all 88 keys (MIDI 21-108)
+        for midi_note in range(21, 109):  # A0 to C8
+            key_color = self._get_default_color_for_key(image, midi_note, x1, y1, width, height,
+                                                        white_key_width, black_key_width,
+                                                        white_key_y, black_key_y,
+                                                        white_key_positions)
 
-            while True:
-                # Find the best match
-                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result_copy)
+            key_location = self._calculate_key_position(midi_note, x1, y1, width, height,
+                                                        white_key_width, black_key_width,
+                                                        white_key_y, black_key_y,
+                                                        white_key_positions)
 
-                # Stop if no more matches
-                if max_val == min_val:
-                    break
+            key = Key(midi_note, key_location, key_color)
+            self.keys.append(key)
 
-                # Create octave at this location
-                octave = Octave(min_loc, image, template)
-                temp_octaves.append(octave)
+    def _calculate_key_position(self, midi_note: int, x1: int, y1: int,
+                                width: int, height: int, white_key_width: float,
+                                black_key_width: float, white_key_y: int, black_key_y: int,
+                                white_key_positions: List[int]) -> Tuple[int, int]:
+        """Calculate the (x, y) position for a given MIDI note"""
+        is_black_key = self._is_black_key(midi_note)
 
-                # Remove this match area to find the next one
-                cv2.rectangle(result_copy,
-                            (min_loc[0] - 10, 0),
-                            (min_loc[0] + template.shape[1] + 10, image.shape[0]),
-                            (1,), -1)
+        if is_black_key:
+            # Black key - position relative to surrounding white keys
+            x = self._get_black_key_x_position(midi_note, x1, white_key_width, white_key_positions)
+            y = black_key_y
+        else:
+            # White key - evenly spaced across the width
+            white_key_index = self._get_white_key_index(midi_note)
+            x = x1 + int(white_key_index * white_key_width + white_key_width / 2)
+            y = white_key_y
+            white_key_positions.append(x)
 
-            # If we found octaves, use them
-            if temp_octaves:
-                self.octaves = temp_octaves
-                break
+        return (x, y)
 
-            thresh += thresh_step
+    def _get_default_color_for_key(self, image: np.ndarray, midi_note: int,
+                                   x1: int, y1: int, width: int, height: int,
+                                   white_key_width: float, black_key_width: float,
+                                   white_key_y: int, black_key_y: int,
+                                   white_key_positions: List[int]) -> Tuple[int, int, int]:
+        """Get the default color for a key at its calculated position"""
+        location = self._calculate_key_position(midi_note, x1, y1, width, height,
+                                                white_key_width, black_key_width,
+                                                white_key_y, black_key_y,
+                                                white_key_positions.copy())
 
-        if not self.octaves:
-            raise RuntimeError("No piano octaves found in the image")
+        x, y = location
 
-        # Sort octaves and assign proper note codes
-        self._sort_octaves(image)
+        # Bounds checking
+        if y >= image.shape[0] or x >= image.shape[1] or x < 0 or y < 0:
+            return (0, 0, 0)  # Default to black if out of bounds
 
-    def _get_scaled_template(self, image: np.ndarray, template: np.ndarray) -> np.ndarray:
-        """Scale the template to best match the image"""
-        img_height, img_width = image.shape[:2]
-        tmpl_height, tmpl_width = template.shape[:2]
+        return tuple(image[y, x].astype(int))
 
-        found_scaled_width = tmpl_width
-        found_min_val = 1.0
+    def _is_black_key(self, midi_note: int) -> bool:
+        """Determine if a MIDI note represents a black key"""
+        note_in_octave = (midi_note - 21) % 12
+        return note_in_octave in [1, 3, 6, 8, 10]  # C#, D#, F#, G#, A#
 
-        # Try different scales
-        for scaled_width in range(tmpl_width, img_width):
-            # Calculate proportional height
-            scale_proportion = scaled_width / img_width
-            scaled_height = int(img_height * scale_proportion)
+    def _get_white_key_index(self, midi_note: int) -> int:
+        """Get the index of a white key (0-51) for positioning"""
+        # Count white keys from A0 (MIDI 21) to this note
+        white_key_count = 0
 
-            # Resize image to this scale
-            image_scaled = cv2.resize(image, (scaled_width, scaled_height),
-                                    interpolation=cv2.INTER_NEAREST)
+        for note in range(21, midi_note + 1):
+            if not self._is_black_key(note):
+                if note == midi_note:
+                    return white_key_count
+                white_key_count += 1
 
-            # Skip if template is larger than scaled image
-            if template.shape[0] > image_scaled.shape[0] or template.shape[1] > image_scaled.shape[1]:
-                continue
+        return 0
 
-            # Perform template matching
-            try:
-                result_scaled = cv2.matchTemplate(image_scaled, template, cv2.TM_SQDIFF_NORMED)
-                min_val, _, _, _ = cv2.minMaxLoc(result_scaled)
+    def _get_black_key_x_position(self, midi_note: int, x1: int, white_key_width: float,
+                                  white_key_positions: List[int]) -> int:
+        """Calculate X position for black keys relative to white keys"""
+        # Black keys are positioned between specific white keys
+        note_in_octave = (midi_note - 21) % 12
+        octave_start_midi = midi_note - note_in_octave
 
-                # Store if this is the best match so far
-                if min_val < found_min_val:
-                    found_scaled_width = scaled_width
-                    found_min_val = min_val
+        # Find the surrounding white keys for this black key
+        if note_in_octave == 1:  # C#
+            left_white = octave_start_midi  # C
+            right_white = octave_start_midi + 2  # D
+        elif note_in_octave == 3:  # D#
+            left_white = octave_start_midi + 2  # D
+            right_white = octave_start_midi + 4  # E
+        elif note_in_octave == 6:  # F#
+            left_white = octave_start_midi + 5  # F
+            right_white = octave_start_midi + 7  # G
+        elif note_in_octave == 8:  # G#
+            left_white = octave_start_midi + 7  # G
+            right_white = octave_start_midi + 9  # A
+        elif note_in_octave == 10:  # A#
+            left_white = octave_start_midi + 9  # A
+            right_white = octave_start_midi + 11  # B
+        else:
+            # This shouldn't happen for black keys
+            return x1
 
-                # Exit early if perfect match
-                if min_val == 0.0:
-                    break
+        # Get white key indices and calculate position between them
+        left_white_index = self._get_white_key_index(left_white)
+        right_white_index = self._get_white_key_index(right_white)
 
-                # Heuristic: stop if no improvement for a while
-                if scaled_width - found_scaled_width > 100:
-                    break
+        left_x = x1 + int(left_white_index * white_key_width + white_key_width / 2)
+        right_x = x1 + int(right_white_index * white_key_width + white_key_width / 2)
 
-            except cv2.error:
-                continue
+        # Black key positioned between the two white keys
+        return int((left_x + right_x) / 2)
 
-        # Scale the template
-        scale = img_width // found_scaled_width
-        scaled_template = cv2.resize(template,
-                                   (tmpl_width * scale, tmpl_height),
-                                   interpolation=cv2.INTER_NEAREST)
-
-        return scaled_template
-
-    def _sort_octaves(self, image: np.ndarray):
-        """Sort octaves from left to right and assign proper MIDI note codes"""
-        # Sort by x coordinate (left to right)
-        self.octaves.sort(key=lambda octave: octave.notes[NOTE_C].location[0])
-
-        # Find middle C by looking for a gray dot
-        middle_c_octave_index = 0
-
-        for index, octave in enumerate(self.octaves):
-            note_c = octave.notes[NOTE_C]
-            x, y = note_c.location
-
-            # Look for a gray pixel below the note
-            thresh = 10
-            for check_y in range(y, min(y + 20, image.shape[0] - 20)):
-                if check_y < image.shape[0] and x < image.shape[1]:
-                    pixel = image[check_y, x]
-
-                    # Check if pixel is significantly different from default color
-                    color_diff = abs(int(note_c.default_color[0]) - int(pixel[0]))
-                    if color_diff > thresh:
-                        middle_c_octave_index = index
-                        break
-
-        # Calculate octave number offset (middle C = C4, MIDI note 60)
-        # C4 = octave 5 in our numbering (since we start from 0)
-        index_to_octave_number = 5 - middle_c_octave_index
-
-        # Update note codes for all octaves
-        for octave_index, octave in enumerate(self.octaves):
-            for note in octave.notes:
-                octave_number = octave_index + index_to_octave_number
-                note.code = (octave_number * 12) + note.code
-
-    def draw_notes(self, image: np.ndarray) -> np.ndarray:
-        """Draw detected notes and octaves on the image for visualization"""
+    def draw_keys(self, image: np.ndarray) -> np.ndarray:
+        """Draw all 88 keys on the image for visualization"""
         image_show = image.copy()
 
-        for octave in self.octaves:
-            # Draw octave bounding box
-            c_note_pos = octave.notes[NOTE_C].location
-            b_note_pos = octave.notes[NOTE_B].location
+        # Draw region boundary
+        x1, y1 = self.region["x1"], self.region["y1"]
+        x2, y2 = self.region["x2"], self.region["y2"]
+        cv2.rectangle(image_show, (x1, y1), (x2, y2), (255, 255, 0), 2)
 
-            cv2.rectangle(image_show, c_note_pos, b_note_pos, (50, 170, 255), 2)
+        # Draw each key
+        for key in self.keys:
+            if key.is_black_key:
+                color = (100, 100, 255) if key.pressed else (200, 100, 100)  # Red for black keys
+                radius = 3
+            else:
+                color = (100, 255, 100) if key.pressed else (100, 200, 255)  # Blue for white keys
+                radius = 4
 
-            # Draw each note
-            for note in octave.notes:
-                cv2.circle(image_show, note.location, 4, (70, 170, 202), -1)
+            cv2.circle(image_show, key.location, radius, color, -1)
+
+            # Draw key number for debugging (only every 12th key to avoid clutter)
+            if key.midi_note % 12 == 0:  # Show only C notes
+                cv2.putText(image_show, str(key.midi_note),
+                            (key.location[0] - 10, key.location[1] - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 255), 1)
 
         return image_show
+
+    def get_key_by_midi_note(self, midi_note: int) -> Key:
+        """Get a specific key by its MIDI note number"""
+        for key in self.keys:
+            if key.midi_note == midi_note:
+                return key
+        raise ValueError(f"Key with MIDI note {midi_note} not found")
+
+    def get_pressed_keys(self) -> List[Key]:
+        """Get all currently pressed keys"""
+        return [key for key in self.keys if key.pressed]
